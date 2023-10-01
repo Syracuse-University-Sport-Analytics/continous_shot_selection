@@ -1,0 +1,690 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(tidyverse)
+library(teamcolors)
+library(directlabels)
+library(ggrepel)
+library(lme4)
+library(broom)
+library(purrr)
+library(sjPlot)
+library(cowplot)
+rstudioapi::writeRStudioPreference("data_viewer_max_columns", 1000L)
+```
+Read in data.
+```{r}
+play_by_play_fg_type <- read_csv("../cleanedData/play_by_play_fg_type_period.csv")
+team_colors_abbr <- read_csv("data/team_colors_abbr.csv")
+play_by_play_fg_type %>% inner_join(team_colors_abbr, by="team") -> play_by_play_fg_type
+play_by_play_season_team_bins <- read_csv("../cleanedData/play_by_play_season_team_bins.csv")
+play_by_play_season_game_team_bin_summary <- read_csv("../cleanedData/play_by_play_season_game_team_bin_summary.csv")
+play_by_play_bins <- read_csv("../cleanedData/play_by_play_bins.csv")
+play_by_play <- read_csv("../cleanedData/play_by_play.csv")
+
+#comment out the following lines to include all data
+play_by_play_fg_type %>% filter(season < 2022) -> play_by_play_fg_type
+play_by_play %>% filter(season < 2022) -> play_by_play
+play_by_play_fg_type %>% filter(season < 2022) ->play_by_play_fg_type
+play_by_play_season_team_bins %>% filter(season < 2022) -> play_by_play_season_team_bins
+play_by_play_season_game_team_bin_summary%>% filter(season < 2022) -> play_by_play_season_game_team_bin_summary
+play_by_play_bins%>% filter(season < 2022) -> play_by_play_bins
+
+
+
+play_by_play  %>% filter(!is.na(outof)) %>% filter(!str_detect(type, "technical")) %>% filter(!str_detect(type, "timeout")) %>% group_by(s_foul_id_plays) %>% slice(1:first(outof))  %>% summarize(shooting_foul_free_throw_points = sum(points), num_free_throws = first(outof), shot_play_id = min(shot_play_id_plays)) %>% rename(s_foul_id = s_foul_id_plays) -> play_by_play_shooting_foul_free_throw_results
+play_by_play %>% left_join(play_by_play_shooting_foul_free_throw_results %>% select(-s_foul_id), by = "shot_play_id") %>% ungroup() %>% mutate(points = ifelse(shot_play == 1, replace_na(points,0), points), true_points = points + replace_na(shooting_foul_free_throw_points,0), `3PT` = (str_detect(description, "3PT") | (replace_na(num_free_throws,0) == 3) | (replace_na(points,0) == 3)) )-> play_by_play_with_free_throw_results
+play_by_play_with_free_throw_results %>% write_csv('data/play_by_play_with_free_throw_results.csv')
+
+play_by_play_with_free_throw_results %>% filter(replace_na(num_free_throws,0) == replace_na(number_foul_throws,0)) %>% #filters out the 5 mistakes by source that the PbP says there's a shooting foul on a missed shot, but there are only 1 free throws. This fails to register a new play in the Python code, so we'll throw it out.
+  filter(shot_play == 1) %>% 
+  mutate(team = ifelse(player != player_shooting, opponent_team, team))-> play_by_play_with_free_throw_results_shots #assign the correct team for shooting fouls
+play_by_play_with_free_throw_results_shots %>% write_csv("data/play_by_play_with_free_throw_results_shots.csv")
+
+play_by_play_with_free_throw_results_shots %>% group_by(`3PT`, player_shooting, season) %>% summarize(and_one_shot_sum = sum(and_one_shot), missed_and_fouled_sum = sum(missed_and_fouled), missed_to_made_fouled_shot_ratio = missed_and_fouled_sum / and_one_shot_sum) -> missed_to_made_fouled_shots
+
+play_by_play_with_free_throw_results_shots %>% left_join(missed_to_made_fouled_shots, by = c("3PT", "player_shooting", "season")) %>% mutate(simulated_fouled_missed_fouled_shots_weight = 1)-> play_by_play_with_free_throw_results_shots_simulated_missed_fouled
+play_by_play_with_free_throw_results_shots_simulated_missed_fouled %>% filter(and_one == T) -> play_by_play_with_free_throw_results_shots_simulated_missed_fouled_and_ones
+#play_by_play_with_free_throw_results_shots_simulated_missed_fouled_and_ones %>% mutate(true_points = ifelse(`3PT` == T, true_points-3, true_points-2), points = ifelse(`3PT` == T, points-3, points-2), simulated_fouled_missed_fouled_shots_weight = ifelse(is.infinite(missed_to_made_fouled_shot_ratio) | is.na(missed_to_made_fouled_shot_ratio), 0, missed_to_made_fouled_shot_ratio)) -> play_by_play_with_free_throw_results_shots_simulated_missed_fouled_and_ones
+play_by_play_with_free_throw_results_shots_simulated_missed_fouled_and_ones %>% mutate(true_points = ifelse(`3PT` == T, ft_percent*3, ft_percent*2), points = ifelse(`3PT` == T, 0, 0), simulated_fouled_missed_fouled_shots_weight = ifelse(is.infinite(missed_to_made_fouled_shot_ratio) | is.na(missed_to_made_fouled_shot_ratio), 0, missed_to_made_fouled_shot_ratio), simulated_fouled_shot = 1) -> play_by_play_with_free_throw_results_shots_simulated_missed_fouled_and_ones
+
+play_by_play_with_free_throw_results_shots_simulated_missed_fouled %>% mutate(simulated_fouled_shot = 0) %>% bind_rows(play_by_play_with_free_throw_results_shots_simulated_missed_fouled_and_ones) -> play_by_play_with_free_throw_results_shots_simulated_missed_fouled
+play_by_play_with_free_throw_results_shots_simulated_missed_fouled %>% write_csv("data/play_by_play_with_free_throw_results_shots_simulated_missed_fouled.csv")
+
+#play_by_play %>% mutate(shooting_foul_foul_shot = ifelse(replace_na(outof, 0)>0 & !str_detect(type, "technical") &  !str_detect(type, "flagrant")&  !str_detect(type, "clear"), 1, 0)) -> play_by_play
+#play_by_play %>% filter(shooting_foul_foul_shot==1) %>% group_by(s_foul_id_plays) %>% slice(1:first(outof)) %>% summarize(shooting_foul_free_throw_points = sum(points), num_free_throws = first(outof)) %>% rename(s_foul_id = s_foul_id_plays) -> play_by_play_shooting_foul_free_throw_results #these two lines were my original, but I decided to use the above instead since I was already calculating the number of free throws
+
+#play_by_play %>% left_join(play_by_play_shooting_foul_free_throw_results, by = "s_foul_id") %>% ungroup() %>% mutate(points = ifelse(and_one_foul == T, lag(points), points), points = ifelse(shot_result_missed_and_fouled == 1, 0, points), true_points = points + replace_na(shooting_foul_free_throw_points,0), `3PT` = (str_detect(description, "3PT") | (num_free_throws == 3) | (points == 3)) ) %>% filter(and_one == F)-> play_by_play_with_free_throw_results
+#play_by_play_with_free_throw_results %>% filter(shot_play == 1) %>% filter(`3PT` == F) %>% View()
+
+#an issue is that the points for and ones are in the previous row. be sure to fix that here and check the python side! 1814 for an example. check and_one == F
+#why is 2347 given two free shots even though it was made? #3133
+```
+
+Summary Stats
+```{r}
+
+play_by_play_bins %>% filter(playoffs == F) %>% group_by(season ) %>% summarise(fga = sum(fga))
+play_by_play_season_game_team_bin_summary %>% filter(playoffs == F) %>% group_by(season ) %>% summarise(fga = sum(fga_game_total))
+
+play_by_play_fg_type %>% filter(playoffs == F) %>% group_by(season, fg_type ) %>% summarize(expected_points = weighted.mean(expected_points,fga, na.rm=T),true_expected_points = weighted.mean(true_expected_points,fga, na.rm=T), fga=sum(fga, na.rm=T), fgm=sum(shot_result_made,na.rm=T), fta=sum(fta,na.rm=T), ftm=sum(ftm,na.rm=T), points=sum(points,na.rm=T)) %>% mutate(expected_points_3pt_premium = expected_points -lag(expected_points ), true_expected_points_3pt_premium = true_expected_points-lag(true_expected_points)) -> expected_points_entire_league_summary
+expected_points_entire_league_summary
+
+play_by_play_fg_type %>% filter(playoffs == F) %>% group_by(season, period, crunch_time, fg_type) %>% summarize(expected_points = weighted.mean(expected_points,fga, na.rm=T),true_expected_points = weighted.mean(true_expected_points,fga, na.rm=T), fga=sum(fga, na.rm=T), fgm=sum(shot_result_made,na.rm=T), fta=sum(fta,na.rm=T), ftm=sum(ftm,na.rm=T), points=sum(points,na.rm=T)) %>% mutate(expected_points_3pt_premium = expected_points -lag(expected_points ), true_expected_points_3pt_premium = true_expected_points-lag(true_expected_points)) -> expected_points_period_entire_league_summary
+expected_points_period_entire_league_summary
+
+play_by_play_fg_type %>% filter(playoffs == F) %>% group_by(season, team_name,team, fg_type ) %>% summarize(expected_points = weighted.mean(expected_points,fga, na.rm=T),true_expected_points = weighted.mean(true_expected_points,estimated_shot_attempts, na.rm=T), estimated_shot_attempts = sum(estimated_shot_attempts, na.rm=T), fga=sum(fga, na.rm=T), fgm=sum(shot_result_made,na.rm=T), fta=sum(fta,na.rm=T), ftm=sum(ftm,na.rm=T), points=sum(points,na.rm=T)) %>% mutate(true_premium = true_expected_points-expected_points) %>% mutate(expected_points_3pt_premium = expected_points -lag(expected_points ), true_expected_points_3pt_premium = true_expected_points-lag(true_expected_points)) -> expected_points_by_team_summary_2
+
+
+play_by_play_fg_type %>% filter(playoffs == F) %>% group_by(season, team_name,team, fg_type ) %>% summarize(estimated_shot_attempts = sum(estimated_shot_attempts, na.rm=T),estimated_points = sum(estimated_points, na.rm=T), fga=sum(fga, na.rm=T), fgm=sum(shot_result_made,na.rm=T), fta=sum(fta,na.rm=T), ftm=sum(ftm,na.rm=T), points=sum(points,na.rm=T),) %>% mutate(expected_points = (fgm * fg_type)/fga, true_expected_points = estimated_points/estimated_shot_attempts, expected_points_3pt_premium = expected_points -lag(expected_points ), true_expected_points_3pt_premium = true_expected_points-lag(true_expected_points), fga_total = fga + lag(fga), estimated_shot_attempts_total = estimated_shot_attempts + lag(estimated_shot_attempts)) -> expected_points_by_team_summary
+
+
+expected_points_by_team_summary %>% group_by(season, team, fg_type) %>% summarize(fgm = sum(fgm), fga=sum(fga), points=sum(points)) %>% mutate(expected_point = (fgm*fg_type)/fga) 
+
+
+expected_points_by_team_summary %>% filter(fg_type == 2) %>% select(-expected_points_3pt_premium, -true_expected_points_3pt_premium, -estimated_shot_attempts_total, -fga_total) -> expected_points_by_team_summary_2p
+expected_points_by_team_summary %>% filter(fg_type == 3) %>% select(-expected_points_3pt_premium, -true_expected_points_3pt_premium, -estimated_shot_attempts_total, -fga_total)  -> expected_points_by_team_summary_3p
+
+
+expected_points_by_team_summary_2p %>% inner_join(expected_points_by_team_summary_3p, by=c("season", "team"),suffix = c("_2pt","_3pt")) %>% mutate(fga = fga_2pt + fga_3pt, fgm = fgm_2pt+fgm_3pt, estimated_shot_attempts = estimated_shot_attempts_2pt + estimated_shot_attempts_3pt, expected_points_3pt_premium = expected_points_3pt-expected_points_2pt,true_expected_points_3pt_premium = true_expected_points_3pt-true_expected_points_2pt, ) -> expected_points_by_team_summary_fg
+
+expected_points_by_team_summary_fg %>% write_csv("data/expected_points_by_team_summary_fg.csv")
+
+
+
+
+
+play_by_play_fg_type %>% filter(playoffs == F) %>% group_by(season, fg_type ) %>% summarize(estimated_shot_attempts = sum(estimated_shot_attempts, na.rm=T),estimated_points = sum(estimated_points, na.rm=T), fga=sum(fga, na.rm=T), fgm=sum(shot_result_made,na.rm=T), fta=sum(fta,na.rm=T), ftm=sum(ftm,na.rm=T), points=sum(points,na.rm=T),) %>% mutate(expected_points = (fgm * fg_type)/fga, true_expected_points = estimated_points/estimated_shot_attempts, expected_points_3pt_premium = expected_points -lag(expected_points ), true_expected_points_3pt_premium = true_expected_points-lag(true_expected_points), fga_total = fga + lag(fga), estimated_shot_attempts_total = estimated_shot_attempts + lag(estimated_shot_attempts)) -> expected_points_by_season_summary
+
+
+
+
+expected_points_by_season_summary %>% filter(fg_type == 2) %>% select(-expected_points_3pt_premium, -true_expected_points_3pt_premium, -estimated_shot_attempts_total, -fga_total) -> expected_points_by_season_summary_2p
+expected_points_by_season_summary %>% filter(fg_type == 3) %>% select(-expected_points_3pt_premium, -true_expected_points_3pt_premium, -estimated_shot_attempts_total, -fga_total)  -> expected_points_by_season_summary_3p
+
+
+expected_points_by_season_summary_2p %>% inner_join(expected_points_by_season_summary_3p, by=c("season"),suffix = c("_2pt","_3pt")) %>% mutate(fga = fga_2pt + fga_3pt, fgm = fgm_2pt+fgm_3pt, estimated_shot_attempts = estimated_shot_attempts_2pt + estimated_shot_attempts_3pt, expected_points_3pt_premium = expected_points_3pt-expected_points_2pt,true_expected_points_3pt_premium = true_expected_points_3pt-true_expected_points_2pt, ) -> expected_points_by_season_summary_fg
+
+expected_points_by_season_summary_fg %>% write_csv("data/expected_points_by_season_summary_fg.csv")
+
+```
+3PT Premium Analysis
+```{r}
+expected_points_by_team_summary%>% filter(fg_type == 3)  %>% ungroup() %>% select(season, expected_points_3pt_premium, team_name, team, fga_total) %>% rename(premium=expected_points_3pt_premium, attempts=fga_total) %>% mutate(type="Expected") -> expected
+expected_points_by_team_summary%>% filter(fg_type == 3)  %>% ungroup() %>% select(season, true_expected_points_3pt_premium, team_name,team, estimated_shot_attempts_total) %>% rename(premium=true_expected_points_3pt_premium,attempts=estimated_shot_attempts_total) %>% mutate(type="True") -> true
+expected %>% bind_rows(true) -> expected_true_tidy
+
+summary(expected_true_tidy %>% lm(formula = premium ~ season + type, weights = attempts ))
+
+
+
+pdf("visuals/analysisVisuals.pdf")
+expected_true_tidy %>% ggplot(aes(x=season, y=premium, color=type)) + geom_point(alpha=0.3) + geom_smooth(method="lm", formula = y ~ x) + scale_color_brewer("Approach", palette = "Set1") + ylab("3PT Expected Point Value Premium") + xlab("Season") + theme_light()
+
+expected_true_tidy %>% filter(type=="True") %>% select(team) %>% unique() %>% mutate(enumerate=1:30) -> team_enumeration
+expected_true_tidy %>% filter(type=="True") %>% inner_join(team_enumeration, by="team") %>% group_by(team) %>% slice(max(enumerate) %% n()+1) -> team_labels
+
+
+expected_true_tidy %>% filter(type=="True") %>% ggplot(aes(x=season, y=premium, color=team_name, fill=team_name)) + geom_point(alpha=0.3) + geom_smooth(method="lm", formula = y ~ x, se=F) + ylab("3PT Expected Point Value Premium") + xlab("Season") + scale_fill_teams(guide = FALSE) + scale_color_teams(2, guide = FALSE)+ggrepel::geom_text_repel(data=team_labels,aes(label = team)) + theme_light() + ylab("3PT True Shot Expected Point Value Premium")
+
+expected_true_tidy %>% filter(type=="True") %>% ggplot(aes(x=season, y=premium, color=team_name, fill=team_name)) + geom_point(alpha=0.3) + geom_smooth(method="lm", formula = y ~ x, se=F) + ylab("3PT Expected Point Value Premium") + xlab("Season") + scale_fill_teams(guide = FALSE) + scale_color_teams(2, guide = FALSE)+ggrepel::geom_text_repel(aes(label = team)) + theme_light() + ylab("3PT True Shot Expected Point Value Premium")
+
+dev.off()
+```
+controls
+```{r}
+# library(tidyr)
+# play_by_play_with_free_throw_results_shots %>% separate(remaining_time, c('remaining_time_h','remaining_time_m','remaining_time_sec'), remove=F) -> play_by_play_with_free_throw_results_shots
+# play_by_play_with_free_throw_results_shots %>% mutate(crunch_time = ifelse((period == 4) & (remaining_time_m + remaining_time_s/60)  <= 2), T, F) -> play_by_play_with_free_throw_results_shots
+# 
+# play_by_play_with_free_throw_results_shots %>% pull(period) %>% table()
+# 
+# play_by_play_with_free_throw_results_shots %>% mutate(test = "test1", test2 = "test2") -> test
+# test %>% mutate(test3 = paste0(test, test2)) %>% pull(test3) %>% table()
+# 
+# data %>% pull(colname) %>% table()
+
+# play_by_play_with_free_throw_results_shots$team
+# 
+# glm(shot_result_made ~ team-1, family = binomial(link = "logit"), data = play_by_play_with_free_throw_results_shots) -> test
+# summary(test)
+```
+
+
+
+regressions for appendix of paper
+```{r}
+play_by_play_fg_type %>% mutate(`3PT` = ifelse(fg_type == 3, 1, 0)) %>% filter(playoffs == F) ->  play_by_play_fg_type_reg_season
+#1.  (run without the standalone 3pt variable for clarity): EP ~ factor(season) + factor(team) + I(3PT_dummy*factor(season))    with same baseline season for interaction variable as was used.  
+play_by_play_fg_type_reg_season %>% lm(formula = expected_points ~  as.factor(season) + team + `3PT`:as.factor(season), weights = shot_play) -> ep_1
+play_by_play_fg_type_reg_season %>% lm(formula = expected_points ~  season + team + I(`3PT`*as.numeric(season)), weights = shot_play) -> ep_2
+play_by_play_fg_type_reg_season %>% lm(formula = expected_points ~  season + I(season^2) + team + I(`3PT`*as.numeric(season))+ I(`3PT`*(as.numeric(season)^2)), weights = shot_play) -> ep_3
+play_by_play_fg_type_reg_season %>% lm(formula = true_expected_points ~  as.factor(season) + team + `3PT`:as.factor(season), weights = shot_play) -> tp_1
+play_by_play_fg_type_reg_season %>% lm(formula = true_expected_points ~  season + team + I(`3PT`*as.numeric(season)), weights = shot_play) -> tp_2
+play_by_play_fg_type_reg_season %>% lm(formula = true_expected_points ~  season + I(season^2) + team + I(`3PT`*as.numeric(season))+ I(`3PT`*(as.numeric(season)^2)), weights = shot_play) -> tp_3
+tab_model(ep_1,ep_2, ep_3, file="tables/ep_models.doc", digits = 3,show.se = T,show.ci=F)
+tab_model(tp_1,tp_2, tp_3, file="tables/tp_models.doc", digits = 3,show.se = T,show.ci=F)
+#2.     EP ~ season + factor(team) + I(3PT_dummy*season)    with same baseline as was used. 
+#3.     EP ~ season + I(season^2) + factor(team) + I(3PT_dummy*season)   + I(3PT_dummy*season^2)   with same baseline as was used.  
+#4.  (run without the standalone 3pt variable for clarity): TP ~ factor(season) + factor(team) + I(3PT_dummy*factor(season))    with same baseline season for interaction variable as was used.  
+#5.     TP ~ season + factor(team) + I(3PT_dummy*season)    with same baseline as was used. 
+#6     TP ~ season + I(season^2) + factor(team) + I(3PT_dummy*season)   + I(3PT_dummy*season^2)   with same baseline as was used.  
+
+
+
+
+
+```
+
+
+regressions with every shot instead of just the aggregate as above (player, period, FG type)
+```{r}
+#the expected is our naive approach, and so should not included missed fouled shots
+play_by_play_with_free_throw_results_shots %>% mutate(less_five_seconds_shot_clock = ifelse((play_length_s-24) < 5, T, F)) -> play_by_play_with_free_throw_results_shots
+#play_by_play_with_free_throw_results_shots_simulated_missed_fouled  %>% filter(playoffs == F) %>% filter(season < 2022) ->  play_by_play_with_free_throw_results_reg_season
+play_by_play_with_free_throw_results_shots%>% filter(playoffs == F) ->  play_by_play_with_free_throw_results_reg_season #if was going to include simulated, but now realize that this is not needed for regression since I don't need to simulate missed fouled shots. play_by_play_with_free_throw_results_shots_simulated_missed_fouled %>% filter(is.na(s_foul))
+
+play_by_play_with_free_throw_results_reg_season %>% filter(is.na(s_foul)) %>% lm(formula = points ~  as.factor(season) + team + `3PT`:as.factor(season)) -> ep_1
+play_by_play_with_free_throw_results_reg_season %>% filter(is.na(s_foul)) %>% lm(formula = points ~  season + team + I(`3PT`*as.numeric(season))) -> ep_2
+play_by_play_with_free_throw_results_reg_season %>% filter(is.na(s_foul)) %>% lm(formula = points ~  season + I(season^2) + team + I(`3PT`*as.numeric(season))+ I(`3PT`*(as.numeric(season)^2))) -> ep_3
+play_by_play_with_free_throw_results_reg_season %>% lm(formula = true_points ~  as.factor(season) + team + `3PT`:as.factor(season)) -> tp_1
+play_by_play_with_free_throw_results_reg_season %>% lm(formula = true_points ~  season + team + I(`3PT`*as.numeric(season))) -> tp_2
+play_by_play_with_free_throw_results_reg_season %>% lm(formula = true_points ~  season + I(season^2) + team + I(`3PT`*as.numeric(season))+ I(`3PT`*(as.numeric(season)^2))) -> tp_3
+tab_model(ep_1,ep_2, ep_3, file="tables/ep_per_shot_models.doc", digits = 3,show.se = T,show.ci=F)
+tab_model(tp_1,tp_2, tp_3, file="tables/tp_per_shot_models.doc", digits = 3,show.se = T,show.ci=F)
+
+
+
+
+
+play_by_play_with_free_throw_results_reg_season %>% filter(is.na(s_foul)) %>% lm(formula = points ~  crunch_time + less_five_seconds_shot_clock + as.factor(season) + team + `3PT`:as.factor(season)) -> ep_1
+play_by_play_with_free_throw_results_reg_season %>% filter(is.na(s_foul)) %>% lm(formula = points ~  crunch_time + less_five_seconds_shot_clock + season + team + I(`3PT`*as.numeric(season))) -> ep_2
+play_by_play_with_free_throw_results_reg_season %>% filter(is.na(s_foul)) %>% lm(formula = points ~  crunch_time + less_five_seconds_shot_clock + season + I(season^2) + team + I(`3PT`*as.numeric(season))+ I(`3PT`*(as.numeric(season)^2))) -> ep_3
+play_by_play_with_free_throw_results_reg_season %>% lm(formula = true_points ~  crunch_time + less_five_seconds_shot_clock + as.factor(season) + team + `3PT`:as.factor(season)) -> tp_1
+play_by_play_with_free_throw_results_reg_season %>% lm(formula = true_points ~  crunch_time + less_five_seconds_shot_clock + season + team + I(`3PT`*as.numeric(season))) -> tp_2
+play_by_play_with_free_throw_results_reg_season %>% lm(formula = true_points ~  crunch_time + less_five_seconds_shot_clock + season + I(season^2) + team + I(`3PT`*as.numeric(season))+ I(`3PT`*(as.numeric(season)^2))) -> tp_3
+tab_model(ep_1,ep_2, ep_3, file="tables/ep_per_shot_controls_models.doc", digits = 3,show.se = T,show.ci=F)
+tab_model(tp_1,tp_2, tp_3, file="tables/tp_per_shot_controls_models.doc", digits = 3,show.se = T,show.ci=F)
+
+
+play_by_play_with_free_throw_results_shots %>% filter(is.na(s_foul))%>% filter(playoffs == F) %>% lm(formula = points ~ 0+ `3PT`:as.factor(season) + as.factor(season)) -> fga_ep_1 #only include field goals
+```
+
+
+
+```{r}
+#https://egallic.fr/en/drawing-a-basketball-court-with-r/
+#https://www.bigdataball.com/help/create-nba-shot-charts/
+# http://stackoverflow.com/questions/6862742/draw-a-circle-with-ggplot2
+# original_x ; original_y; converted_x ; converted_y Coordinates of the shooting player. original:
+# tracking coordinate system half court, (0,0) center of the basket; converted: coordinates in
+# feet full court, (0,0) bottom-left corner
+circle_fun <- function(center=c(0,0), diameter=1, npoints=500, start=0, end=2){
+  tt <- seq(start*pi, end*pi, length.out=npoints)
+  data.frame(
+    x = center[1] + diameter / 2 * cos(tt),
+    y = center[2] + diameter / 2 * sin(tt)
+  )
+}
+# Gives y coordinates of the opposite side
+rev_y <- function(y) 94-y
+# From x and y coordinates for a line (represented by a polygon here),
+# a number of group and a short description
+# creates a data.frame for this line
+# in order to use it with ggplot2.
+new_coords <- function(x, y, group, descri){
+  new_coords_df <- data.frame(x = x, y = y)
+  new_coords_df$group <- group
+  new_coords_df$side <- 1
+  group <- group + 1
+  
+  # The same thing for the opposite side
+  new_coords_df2 <- data.frame(x = x, y = rev_y(y))
+  new_coords_df2$group <- group
+  new_coords_df2$side <- 2
+  group <<- group + 1
+  
+  # On reunit les donnees
+  new_coords_df <- rbind(new_coords_df, new_coords_df2)
+  new_coords_df$descri <- descri
+  
+  return(new_coords_df)
+}
+# Restricted area
+cercle_np_out <- circle_fun(center = c(25,5+3/12), diameter = (4+1/6)*2)
+cercle_np_in <- circle_fun(center = c(25,5+3/12), diameter = 4*2)
+# Three point
+cercle_3pts_out <- circle_fun(center = c(25,5+3/12), diameter = (23+9/12)*2)
+cercle_3pts_in <- circle_fun(center = c(25,5+3/12), diameter = (23+7/12)*2)
+# Hoop
+cercle_ce <- circle_fun(center = c(25,5+3/12), diameter = 1.5)
+# Free Throws
+cercle_lf_out <- circle_fun(center = c(25,19), diameter = 6*2)
+cercle_lf_in <- circle_fun(center = c(25,19), diameter = (6-1/6)*2)
+# Center Circle
+cercle_mil_out <- circle_fun(center = c(25,47), diameter = 6*2)
+cercle_mil_in <- circle_fun(center = c(25,47), diameter = (6-1/6)*2)
+# Small Center Circle
+cercle_mil_petit_out <- circle_fun(center = c(25,47), diameter = 2*2)
+cercle_mil_petit_in <- circle_fun(center = c(25,47), diameter = (2-1/6)*2)
+group <- 1
+court <- new_coords(c(0-1/6,0-1/6,50 + 1/6,50 + 1/6), c(0 - 1/6,0,0,0 - 1/6), group = group, descri = "ligne de fond")
+court <- rbind(court, new_coords(x = c(0-1/6,0-1/6,0,0), y = c(0,47-1/12,47-1/12,0), group = group, descri = "ligne gauche"))
+court <- rbind(court, new_coords(x = c(50,50,50+1/6,50+1/6), y = c(0,47-1/12,47-1/12,0), group = group, descri = "ligne droite"))
+court <- rbind(court, new_coords(x = c(0,0,3,3), y = c(28,28+1/6,28+1/6,28), group = group, descri = "marque entraineur gauche"))
+court <- rbind(court, new_coords(x = c(47,47,50,50), y = c(28,28+1/6,28+1/6,28), group = group, descri = "marque entraineur droite"))
+court <- rbind(court, new_coords(x = c(3,3,3+1/6,3+1/6), y = c(0,14,14,0), group = group, descri = "3pts bas gauche"))
+court <- rbind(court, new_coords(x = c(47-1/6,47-1/6,47,47), y = c(0,14,14,0), group = group, descri = "3pts bas droit"))
+court <- rbind(court, new_coords(x = c(17,17,17+1/6,17+1/6), y = c(0,19,19,0), group = group, descri = "LF bas gauche"))
+court <- rbind(court, new_coords(x = c(33-1/6,33-1/6,33,33), y = c(0,19,19,0), group = group, descri = "LF bas droit"))
+court <- rbind(court, new_coords(x = c(17,17,33,33), y = c(19-1/6,19,19,19-1/6), group = group, descri = "LF tireur"))
+court <- rbind(court, new_coords(x = c(14-1/6,14-1/6,14,14), y = c(0,1/2,1/2,0), group = group, descri = "marque fond gauche"))
+court <- rbind(court, new_coords(x = c(36,36,36+1/6,36+1/6), y = c(0,1/2,1/2,0), group = group, descri = "marque fond droit"))
+court <- rbind(court, new_coords(x = c(19,19,19+1/6,19+1/6), y = c(0,19,19,0), group = group, descri = "LF gauche interieur"))
+court <- rbind(court, new_coords(x = c(31-1/6,31-1/6,31,31), y = c(0,19,19,0), group = group, descri = "LF droite interieur"))
+court <- rbind(court, new_coords(x = c(22, 22, 28, 28), y = c(4-1/6,4,4,4-1/6), group = group, descri = "planche"))
+court <- rbind(court, new_coords(x = c(cercle_3pts_out[31:220,"x"], rev(cercle_3pts_in[31:220,"x"])),
+                                y = c(cercle_3pts_out[31:220,"y"], rev(cercle_3pts_in[31:220,"y"])), group = group, descri = "cercle 3pts"))
+court <- rbind(court, new_coords(x = c(cercle_np_out[1:250,"x"], rev(cercle_np_in[1:250,"x"])),
+                                y = c(cercle_np_out[1:250,"y"], rev(cercle_np_in[1:250,"y"])), group = group, descri = "cercle non passage en force"))
+court <- rbind(court, new_coords(x = c(20+1/6,20+1/6,20+8/12,20+8/12), y = c(13,13+1/6,13+1/6,13), group = group, descri = "marque bas gauche cercle LF"))
+court <- rbind(court, new_coords(x = c(30-8/12,30-8/12,30-1/6,30-1/6), y = c(13,13+1/6,13+1/6,13), group = group, descri = "marque bas droite cercle LF"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[1:250,"x"], rev(cercle_lf_in[1:250,"x"])),
+                                y = c(cercle_lf_out[1:250,"y"], rev(cercle_lf_in[1:250,"y"])), group = group, descri = "cercle LF haut"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[250:269,"x"], rev(cercle_lf_in[250:269,"x"])),
+                                y = c(cercle_lf_out[250:269,"y"], rev(cercle_lf_in[250:269,"y"])), group = group, descri = "cercle LF partie 1"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[288:308,"x"], rev(cercle_lf_in[288:308,"x"])),
+                                y = c(cercle_lf_out[288:308,"y"], rev(cercle_lf_in[288:308,"y"])), group = group, descri = "cercle LF partie 2"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[327:346,"x"], rev(cercle_lf_in[327:346,"x"])),
+                                y = c(cercle_lf_out[327:346,"y"], rev(cercle_lf_in[327:346,"y"])), group = group, descri = "cercle LF partie 3"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[365:385,"x"], rev(cercle_lf_in[365:385,"x"])),
+                                y = c(cercle_lf_out[365:385,"y"], rev(cercle_lf_in[365:385,"y"])), group = group, descri = "cercle LF partie 4"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[404:423,"x"], rev(cercle_lf_in[404:423,"x"])),
+                                y = c(cercle_lf_out[404:423,"y"], rev(cercle_lf_in[404:423,"y"])), group = group, descri = "cercle LF partie 5"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[442:462,"x"], rev(cercle_lf_in[442:462,"x"])),
+                                y = c(cercle_lf_out[442:462,"y"], rev(cercle_lf_in[442:462,"y"])), group = group, descri = "cercle LF partie 6"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[481:500,"x"], rev(cercle_lf_in[481:500,"x"])),
+                                y = c(cercle_lf_out[481:500,"y"], rev(cercle_lf_in[481:500,"y"])), group = group, descri = "cercle LF partie 7"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(7,7+1/6,7+1/6,7), group = group, descri = "marque 1 LF gauche"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(8+1/6,8+1/3,8+1/3,8+1/6), group = group, descri = "marque 2 LF gauche"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(11+1/3,11.5,11.5,11+1/3), group = group, descri = "marque 3 LF gauche"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(14.5,14.5+1/6,14.5+1/6,14.5), group = group, descri = "marque 4 LF gauche"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(7,7+1/6,7+1/6,7), group = group, descri = "marque 1 LF droite"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(8+1/6,8+1/3,8+1/3,8+1/6), group = group, descri = "marque 2 LF droite"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(11+1/3,11.5,11.5,11+1/3), group = group, descri = "marque 3 LF droite"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(14.5,14.5+1/6,14.5+1/6,14.5), group = group, descri = "marque 4 LF droite"))
+court <- rbind(court, new_coords(x = c(0-1/6,0-1/6,50+1/6,50+1/6), y = c(94/2-1/12,94/2, 94/2, 94/2-1/12), group = group, descri = "ligne mediane"))
+court <- rbind(court, new_coords(x = c(cercle_mil_out[250:500,"x"], rev(cercle_mil_in[250:500,"x"])),
+                                y = c(cercle_mil_out[250:500,"y"], rev(cercle_mil_in[250:500,"y"])), group = group, descri = "cercle milieu grand"))
+court <- rbind(court, new_coords(x = c(cercle_mil_petit_out[250:500,"x"], rev(cercle_mil_petit_in[250:500,"x"])),
+                                y = c(cercle_mil_petit_out[250:500,"y"], rev(cercle_mil_petit_in[250:500,"y"])), group = group, descri = "cercle milieu petit"))
+court <- rbind(court, new_coords(x = cercle_ce[,"x"], y = cercle_ce[,"y"], group = group, descri = "anneau"))
+
+rotate_court <- function(court, theta=pi/2){
+  court_r <- court
+  court_r$x <- court_r$x / 180 * pi
+  court_r$y <- court_r$y / 180 * pi
+  matrice_r <- matrix(c(cos(theta), sin(theta), -sin(theta), cos(theta)), ncol = 2)
+  coords_r <- apply(court_r[,c("x","y")], 1, function(x) x %*% matrice_r)
+  court_r$x <- coords_r[1,] ; court_r$y <- coords_r[2,]
+  court_r$x <- court_r$x * 180 / pi
+  court_r$y <- court_r$y * 180 / pi
+  return(court_r)
+}
+
+P_half_180 <- ggplot() + geom_polygon(data = rotate_court(court[court$side==1,], theta = 0), aes(x = x, y = y, group = group), col = "gray") +
+  coord_equal() +
+  xlim(-2,50) +
+  ylim(-55,2) +
+  scale_x_continuous(breaks = c(0, 23.5, 47)) +
+  scale_y_continuous(breaks = c(0, -12.5, -25, -37.5, -50)) +
+  xlab("") + ylab("") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(), axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(), axis.title = element_blank()
+  )
+P_half_180
+```
+
+
+
+
+```{r}
+# other potential visualizations: https://mfasiolo.github.io/mgcViz/articles/mgcviz.html
+library(modelr)
+library(mgcv) #gam
+library(randomForest)
+library(sportyR)
+
+play_by_play_with_free_throw_results_reg_season %>% filter(!is.na(x), !is.na(y), !is.na(true_points)) -> play_by_play_with_free_throw_results_reg_season_attempts
+
+shot_position_model_gam = gam(true_points ~ s(x,y) ,data=play_by_play_with_free_throw_results_reg_season_attempts)
+# shot_position_model_loess = loess(true_points ~ x+y,data=play_by_play_with_free_throw_results_reg_season_attempts)
+# shot_position_model_rf = randomForest(true_points ~ x+y,data=play_by_play_with_free_throw_results_reg_season_attempts)
+
+grid_dim <- 200
+grid_tile_width <- (max(play_by_play_with_free_throw_results_reg_season_attempts$x)-min(play_by_play_with_free_throw_results_reg_season_attempts$x))/grid_dim
+grid_tile_height <- (max(play_by_play_with_free_throw_results_reg_season_attempts$y)-min(play_by_play_with_free_throw_results_reg_season_attempts$y))/grid_dim
+
+
+
+play_by_play_with_free_throw_results_reg_season_attempts %>% data_grid(x = seq_range(x, n=grid_dim), y = seq_range(y, n=grid_dim)) -> grid
+grid$true_points <- predict(shot_position_model_gam, grid)
+grid %>% filter(true_points >= 0) -> grid
+grid %>% ggplot(aes(x=x, y=y)) + geom_tile(aes(fill=true_points)) + geom_point(data = grid %>% slice(which.max(true_points))) + geom_contour(aes(z=true_points)) + scale_fill_gradient2(low="blue", mid="white", high = "red", midpoint = 1) + theme_bw()
+plot(shot_position_model_gam, page = 1, scheme = 2) 
+
+
+#P_half_180 + geom_point(data = play_by_play_with_free_throw_results_reg_season_attempts %>% sample_n(10000), aes(color=`3PT`,x=x, y=y))
+#P_half_180 + geom_tile(data = grid, aes(fill=true_points,x=x, y=y), alpha=0) + geom_point(data = grid %>% slice(which.max(true_points)), aes(fill=true_points,x=x, y=y)) + geom_contour(data = grid, aes(z=true_points,x=x, y=y)) + scale_fill_gradient2(low="blue", mid="white", high = "red", midpoint = 1) + theme_bw()
+
+pdf("visuals/shot_chart_gam.pdf")
+
+grid %>% ggplot(aes(x=x, y=y)) + geom_tile(aes(fill=true_points), width=grid_tile_width, height=grid_tile_height) + geom_point(data = grid %>% slice(which.max(true_points))) + geom_contour(aes(z=true_points)) + scale_fill_gradient2(low="blue", mid="white", high = "red", midpoint = 1) + theme_bw() + geom_polygon(data = rotate_court(court[court$side==1,], theta = 0), aes(x = x, y = y, group = group), col = "gray") +
+  coord_equal() +
+  xlim(-2,50) +
+  ylim(-55,2) +
+  scale_x_continuous(breaks = c(0, 23.5, 47)) +
+  scale_y_continuous(breaks = c(0, -12.5, -25, -37.5, -50)) +
+  xlab("") + ylab("") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(), axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(), axis.title = element_blank()
+  ) + ggtitle("GAM Model")
+
+
+# grid$true_points <- predict(shot_position_model_loess, grid)
+# grid %>% ggplot(aes(x=x, y=y)) + geom_tile(aes(fill=true_points)) + geom_point(data = grid %>% slice(which.max(true_points))) + geom_contour(aes(z=true_points)) + scale_fill_gradient2(low="blue", mid="white", high = "red", midpoint = 1) + theme_bw() + geom_polygon(data = rotate_court(court[court$side==1,], theta = 0), aes(x = x, y = y, group = group), col = "gray") +
+#   coord_equal() +
+#   xlim(-2,50) +
+#   ylim(-55,2) +
+#   scale_x_continuous(breaks = c(0, 23.5, 47)) +
+#   scale_y_continuous(breaks = c(0, -12.5, -25, -37.5, -50)) +
+#   xlab("") + ylab("") +
+#   theme(axis.text.x = element_blank(),
+#         axis.text.y = element_blank(), axis.ticks.x = element_blank(),
+#         axis.ticks.y = element_blank(), axis.title = element_blank()
+#   ) + ggtitle("LOESS Model")
+# 
+# grid$true_points <- predict(shot_position_model_rf, grid)
+# grid %>% ggplot(aes(x=x, y=y)) + geom_tile(aes(fill=true_points)) + geom_point(data = grid %>% slice(which.max(true_points))) + geom_contour(aes(z=true_points)) + scale_fill_gradient2(low="blue", mid="white", high = "red", midpoint = 1) + theme_bw() + geom_polygon(data = rotate_court(court[court$side==1,], theta = 0), aes(x = x, y = y, group = group), col = "gray") +
+#   coord_equal() +
+#   xlim(-2,50) +
+#   ylim(-55,2) +
+#   scale_x_continuous(breaks = c(0, 23.5, 47)) +
+#   scale_y_continuous(breaks = c(0, -12.5, -25, -37.5, -50)) +
+#   xlab("") + ylab("") +
+#   theme(axis.text.x = element_blank(),
+#         axis.text.y = element_blank(), axis.ticks.x = element_blank(),
+#         axis.ticks.y = element_blank(), axis.title = element_blank()
+#   ) + ggtitle("Random Forests Model")
+# 
+dev.off()
+```
+
+
+
+
+FE Visualizations
+```{r}
+pdf("visuals/analysisVisuals2.pdf")
+
+play_by_play_fg_type %>% mutate(`3PT` = ifelse(fg_type == 3, 1, 0)) %>% filter(playoffs == F) ->  play_by_play_fg_type_reg_season
+play_by_play_fg_type_reg_season %>% lm(formula = true_expected_points ~ `3PT` * as.factor(season) + team, weights = fga) -> season_fe_model
+
+play_by_play_fg_type_reg_season %>% lm(formula = true_expected_points ~ as.factor(season) +`3PT` : as.factor(season) + team, weights = fga) -> season_fe_model_no_standalone
+
+play_by_play_fg_type_reg_season %>% lm(formula = expected_points ~ as.factor(season) +`3PT` : as.factor(season) + team, weights = fga) -> season_fe_model_no_standalone_expected
+
+tab_model(season_fe_model_no_standalone,season_fe_model_no_standalone_expected, file="tables/adjusted_models.html", digits = 4,show.se = T)
+tab_model(season_fe_model_no_standalone,season_fe_model_no_standalone_expected, file="tables/adjusted_models.doc", digits = 4,show.se = T)
+tab_model(season_fe_model_no_standalone,season_fe_model_no_standalone_expected, file="tables/adjusted_models_no_ci.html", digits = 4,show.se = T,show.ci=F)
+tab_model(season_fe_model_no_standalone,season_fe_model_no_standalone_expected, file="tables/adjusted_models_no_ci.doc", digits = 4,show.se = T,show.ci=F)
+
+
+map_df(list(season_fe_model_no_standalone), tidy) -> season_fe_model_estimate
+season_fe_model_estimate %>% filter(term != "(Intercept)",!grepl('player_shooting', term),grepl('3PT', term)) %>% mutate(season = play_by_play_fg_type_reg_season %>% pull(season) %>% unique() %>% sort()) -> season_fe_model_estimate
+
+season_fe_model_estimate %>% mutate(q1 = qnorm(.25, mean = estimate, sd = std.error), q3 = qnorm(.75, mean = estimate, sd = std.error), iqr = q3-q1, min=qnorm(.025, mean = estimate, sd = std.error), max=qnorm(.975, mean = estimate, sd = std.error)) -> season_fe_model_estimate 
+
+
+map_df(list(season_fe_model_no_standalone_expected), tidy) -> season_fe_model_estimate_expected
+season_fe_model_estimate_expected %>% filter(term != "(Intercept)",!grepl('player_shooting', term),grepl('3PT', term)) %>% mutate(season = play_by_play_fg_type_reg_season %>% pull(season) %>% unique() %>% sort()) -> season_fe_model_estimate_expected
+season_fe_model_estimate_expected %>% mutate(q1 = qnorm(.25, mean = estimate, sd = std.error), q3 = qnorm(.75, mean = estimate, sd = std.error), iqr = q3-q1, min=qnorm(.025, mean = estimate, sd = std.error), max=qnorm(.975, mean = estimate, sd = std.error)) -> season_fe_model_estimate_expected 
+
+
+(season_fe_model_estimate %>% mutate(season = as.factor(season)) %>% ggplot(aes(x=season)) + geom_boxplot(aes(lower = q1, upper = q3, middle = estimate, ymin = min,ymax = max), stat="identity") + ylab("3PT True Point Value Premium") + xlab("Season")+ theme_light() + geom_hline(yintercept=0, linetype="dashed", color = "blue", size=0.5) + theme_light() -> true_3pt_premium_whisker) #https://stackoverflow.com/questions/22212885/producing-a-boxplot-in-ggplot2-using-summary-statistics
+
+
+
+season_fe_model_estimate_expected %>% mutate(season = as.factor(season)) %>% ggplot(aes(x=season)) + geom_boxplot(aes(lower = q1, upper = q3, middle = estimate, ymin = min,ymax = max), stat="identity") + ylab("3PT Expected Point Value Premium") + xlab("Season") + theme_light() + geom_hline(yintercept=0, linetype="dashed", color = "blue", size=0.5) -> expected_3pt_premium_whisker#https://stackoverflow.com/questions/22212885/producing-a-boxplot-in-ggplot2-using-summary-statistics
+
+print(plot_grid(true_3pt_premium_whisker + coord_cartesian(ylim = c(-.08,0.08)), expected_3pt_premium_whisker + coord_cartesian(ylim = c(-.08,0.08)), align = "h"))
+
+
+play_by_play_fg_type_reg_season %>% group_by(fg_type, season) %>% summarize(true_expected_points = weighted.mean(true_expected_points,fga, na.rm=T),expected_points = weighted.mean(expected_points,fga, na.rm=T)) %>% arrange(season, fg_type) %>% write_csv("data/true_expected_points_per_season.csv")
+
+
+
+
+
+
+play_by_play_fg_type_reg_season %>% lm(formula = true_expected_points ~ as.factor(season) +  team + team:`3PT`:as.factor(season), weights = fga) -> season_team_fe_model
+tibble(coefficient=names(season_team_fe_model$coefficients), estimate = season_team_fe_model$coefficients) -> season_team_fe_model_estimate
+season_team_fe_model_estimate %>% filter(grepl(':team', coefficient)) %>% mutate(team = str_split_fixed(coefficient, c(":"),n=3)[,2]) %>% mutate(season = str_split_fixed(coefficient, c(":"),n=3)[,1]) %>% mutate(season = as.numeric(str_split_fixed(season, c("[)]"),n=2)[,2])) %>% mutate(team = str_replace(team,"team","")) -> season_team_fe_model_estimate
+season_team_fe_model_estimate %>% inner_join(team_colors_abbr, by="team") -> season_team_fe_model_estimate
+season_team_fe_model_estimate %>% ggplot(aes(x=season, y=estimate)) + geom_point(alpha=0.3, aes(color=team_name, fill=team_name)) + geom_smooth(method="lm", formula = y ~ x) + ylab("3PT True Point Value Premium") + xlab("Season") + theme_light() +  scale_fill_teams(guide = FALSE) + scale_color_teams(2, guide = FALSE)
+
+dev.off()
+```
+
+
+
+Season trend visualizations
+```{r}
+pdf("visuals/analysisVisuals3.pdf")
+shotchart <- read_csv("data/expected_points_by_team_summary_fg.csv")
+
+shotchart %>% mutate(estimated_shot_attempts_2pt=round(estimated_shot_attempts_2pt),
+                     proportion_2Pshots_fga=fga_2pt/estimated_shot_attempts_2pt,proportion_3Pshots_fga=fga_3pt/estimated_shot_attempts_3pt) -> shotchart
+shotchart %>% group_by(season) %>% mutate(total_2fga =sum(fga_2pt),total_3fga=sum(fga_3pt),total_fga=total_3fga+total_2fga,prop_3pt=total_3fga/total_fga) -> season_shot_summary
+#View(season_shot_summary)
+summary(season_shot_summary$prop_3pt)
+summary(lm(season_shot_summary$prop_3pt~season_shot_summary$season))
+
+(threept_trend <- ggplot(season_shot_summary,aes(season,prop_3pt))+ geom_point() + theme_bw()) 
+(threept_trend <- ggplot(season_shot_summary,aes(season,prop_3pt))+ geom_point() + geom_smooth(method="lm") + theme_bw()) 
+
+season_shot_summary %>% mutate(ftrate_2 = sum(ftm_2pt)/sum(fga_2pt),ftrate_3=sum(ftm_3pt)/sum(fga_3pt),ftrate_diff=ftrate_2 - ftrate_3) -> season_shot_summary
+
+(ftrate_trend <- ggplot(season_shot_summary,aes(season,ftrate_diff))+ geom_point()+ theme_bw()) 
+
+shot_type <- c("Two Point Shots"="blue","Three Point Shots"="red")
+season_shot_summary %>% mutate(shots_per_fga_2 = sum(estimated_shot_attempts_2pt/fga_2pt),shots_per_fga_3 = sum(estimated_shot_attempts_3pt/fga_3pt)) -> season_shot_summary
+(ftrate_trend <- ggplot(season_shot_summary,aes(x=season,y=Shots_per_FGA))+ geom_point(aes(y=shots_per_fga_2),color="blue")+geom_point(aes(y=shots_per_fga_3),color="red")+ theme_bw())
+ftrate_trend <- ftrate_trend + scale_color_manual(name="Legend",breaks=c("2pt","3pt"),values = c("2pt"="blue","3pt"="red"))
+ftrate_trend                              
+#View(shotchart)
+summary(shotchart$proportion_2Pshots_fga)
+summary(shotchart$proportion_3Pshots_fga)
+
+plot(density(shotchart$proportion_2Pshots_fga))
+plot(density(shotchart$proportion_3Pshots_fga-.001))
+
+
+ftrate_trend <- ggplot(season_shot_summary,aes(x=season,y=Shots_per_FGA))+ geom_point(aes(y=shots_per_fga_2,color="2pt"))+geom_point(aes(y=shots_per_fga_3,color="3pt")) + theme_bw()
+(ftrate_trend <- ftrate_trend + scale_colour_manual(name = 'Type of FG', values =c('2pt'='blue','3pt'='red'), labels = c('2pt','3pt'))+ theme_bw())
+
+
+ftrate_trend <- ggplot(season_shot_summary,aes(x=season,y=Shots_per_FGA))+ geom_point(aes(y=shots_per_fga_2,color="2pt"))+geom_point(aes(y=shots_per_fga_3,color="3pt"))+ geom_smooth(aes(y=shots_per_fga_2,color="2pt"),method="lm")+geom_smooth(aes(y=shots_per_fga_3,color="3pt"),method="lm") + theme_bw()
+(ftrate_trend <- ftrate_trend + scale_colour_manual(name = 'Type of FG', values =c('2pt'='blue','3pt'='red'), labels = c('2pt','3pt'))+ theme_bw())
+
+dev.off()
+
+```
+
+
+Proportion Visualizations
+```{r}
+pdf("visuals/analysisVisuals4.pdf")
+expected_points_by_team_summary_fg <- read_csv("data/expected_points_by_team_summary_fg.csv")
+expected_points_by_team_summary_fg %>% group_by(season) %>%  summarize(FGA_per_shot = sum(fga_2pt)/sum(estimated_shot_attempts_2pt)) %>% mutate(`Type of FG` = "2PT") %>% bind_rows(
+  expected_points_by_team_summary_fg %>% group_by(season) %>%  summarize(FGA_per_shot = sum(fga_3pt)/sum(estimated_shot_attempts_3pt)) %>% mutate(`Type of FG` = "3PT")
+) -> expected_points_by_team_summary_fg_type
+
+
+expected_points_by_team_summary_fg_type %>% ggplot(aes(color = `Type of FG`, x=season, y=FGA_per_shot)) + geom_point() +  scale_colour_manual(name = 'Type of FG', values =c('2PT'='blue','3PT'='red'), labels = c('2PT','3PT'))+ theme_bw() + xlab("Season") + ylab("FGA per Shot")
+
+expected_points_by_team_summary_fg_type %>% ggplot(aes(color = `Type of FG`, x=season, y=FGA_per_shot)) + geom_point() + geom_smooth(method="lm") +  scale_colour_manual(name = 'Type of FG', values =c('2PT'='blue','3PT'='red'), labels = c('2PT','3PT'))+ theme_bw() + xlab("Season") + ylab("FGA per Shot")
+
+dev.off()
+```
+
+
+
+Time trend models
+```{r}
+options(max.print=999999)
+play_by_play_season_player_team_bins <- read_csv("../cleanedData/play_by_play_season_player_team_bins.csv")
+play_by_play_season_bins <- read_csv("../cleanedData/play_by_play_season_bins.csv")
+#play_by_play_season_player_team_bins %>% mutate(`3PT` = ifelse(fta_given_if_fouled_and_missed == 3, 1, 0)) -> play_by_play_season_player_team_bins
+play_by_play_season_player_team_bins %>% mutate(`3PT` = fta_given_if_fouled_and_missed-2) %>% filter(playoffs == F) -> play_by_play_season_player_team_bins #allow for fuzy 3 vs 2 pts
+
+
+
+play_by_play_season_player_team_bins %>% lm(formula = true_expected_points ~ `3PT` * as.factor(season) + team, weights = fga) -> season_fe_model #3PT coefficient is the 2016 value this one is the closest so far
+play_by_play_season_player_team_bins %>% lm(formula = true_expected_points ~ `3PT` * as.factor(season) + team + team:`3PT`:as.factor(season), weights = fga) -> season_team_fe_model
+
+tibble(bin_id=names(season_fe_model$coefficients), estimate = season_fe_model$coefficients) -> season_fe_model_estimate
+season_fe_model_estimate %>% filter(bin_id != "(Intercept)",!grepl('player_shooting', bin_id),grepl('3PT', bin_id)) %>% mutate(season = play_by_play_season_player_team_bins %>% pull(season) %>% unique() %>% sort()) -> season_fe_model_estimate
+season_fe_model_estimate %>% mutate(estimate  = ifelse(row_number() > 1, estimate + .$estimate[1], estimate)) -> season_fe_model_estimate #add the ME to the original 3PT premium (2016)
+
+
+summary(season_fe_model_estimate %>% lm(formula = estimate ~ season + I(season^2)))
+season_fe_model_estimate %>% ggplot(aes(x=season, y=estimate)) + geom_point(alpha=0.3) + geom_smooth(method="lm", formula = y ~ x) + scale_color_brewer("Approach", palette = "Set1") + ylab("3PT Expected Point Value Premium") + xlab("Season") + theme_light()
+season_fe_model_estimate %>% ggplot(aes(x=season, y=estimate)) + geom_point(alpha=0.3) + geom_smooth(method="lm", formula = y ~ poly(x,raw=T)) + scale_color_brewer("Approach", palette = "Set1") + ylab("3PT Expected Point Value Premium") + xlab("Season") + theme_light()
+
+
+```
+
+
+
+Cluster summary
+```{r}
+play_by_play_season_game_team_bins <- read_csv("../cleanedData/play_by_play_season_game_team_bins.csv")
+play_by_play_season_game_team_bins %>% replace(is.na(.), 0) -> play_by_play_season_game_team_bins
+play_by_play_season_game_team_bins %>% mutate(shot_percentage = estimated_shot_attempts/estimated_shot_attempts_game_total, opponent_shot_percentage = opponent_estimated_shot_attempts/opponent_estimated_shot_attempts_game_total,shot_percentage_difference=shot_percentage-opponent_shot_percentage, points_difference=points_game_total-opponent_points_game_total, bin_id=paste(x_court_bin,y_court_bin,sep = ",")) -> play_by_play_season_game_team_bins
+
+
+
+play_by_play_season_bins_clustered <- read_csv("../cleanedData/play_by_play_season_bins_clustered.csv")
+play_by_play_season_bins_clustered %>% select(x_court_bin,y_court_bin,cluster) %>% inner_join(play_by_play_season_game_team_bins, by=c("x_court_bin","y_court_bin")) -> play_by_play_season_game_team_bins_clustered
+
+play_by_play_season_game_team_bins_clustered %>% group_by(cluster, game_id, team, opponent_team) %>% summarize(estimated_points = sum(estimated_points), 
+                                                                                                          estimated_shot_attempts=sum(estimated_shot_attempts), 
+                                                                                                          estimated_shot_attempts_game_total=max(estimated_shot_attempts_game_total),
+                                                                                                          points_game_total = max(points_game_total),
+                                                                                                          opponent_estimated_points = sum(opponent_estimated_points), 
+                                                                                                          opponent_estimated_shot_attempts=sum(opponent_estimated_shot_attempts), 
+                                                                                                          opponent_estimated_shot_attempts_game_total=max(opponent_estimated_shot_attempts_game_total),
+                                                                                                          opponent_points_game_total = max(opponent_points_game_total),) %>% mutate(
+                                                                                                            shot_percentage = estimated_shot_attempts/estimated_shot_attempts_game_total, 
+                                                                                                            opponent_shot_percentage = opponent_estimated_shot_attempts/opponent_estimated_shot_attempts_game_total,
+                                                                                                            shot_percentage_difference=shot_percentage-opponent_shot_percentage, 
+                                                                                                            points_difference=points_game_total-opponent_points_game_total) -> play_by_play_season_game_team_bins_clustered_summary
+```
+
+
+Shot chart cluster analysis
+
+```{r}
+shot_selection_lm <- lm(data=play_by_play_season_game_team_bins, formula=points_difference~shot_percentage_difference:bin_id)
+shot_selection_lm$coefficients
+tibble(bin_id=names(shot_selection_lm$coefficients), estimate = shot_selection_lm$coefficients) -> shot_selection_lm_me
+shot_selection_lm_me %>% filter(bin_id != "(Intercept)") %>% mutate(x_court_bin = str_split_fixed(bin_id, c(","),n=2)[,1],y_court_bin=as.numeric(str_split_fixed(bin_id, ",",n=2)[,2]),x_court_bin = as.numeric(str_split_fixed(x_court_bin, c("bin_id"),n=2)[,2])) -> shot_selection_lm_me
+
+
+
+shot_selection_clustered_lm <- lm(data=play_by_play_season_game_team_bins_clustered_summary %>% mutate(cluster=as.factor(cluster)), formula=points_difference~shot_percentage_difference:cluster)
+shot_selection_clustered_lm$coefficients
+tibble(cluster=names(shot_selection_clustered_lm$coefficients), estimate = shot_selection_clustered_lm$coefficients) -> shot_selection_cluster_lm_me
+shot_selection_cluster_lm_me %>% filter(cluster != "(Intercept)") %>% mutate(cluster = as.numeric(str_split_fixed(cluster, c("cluster"),n=2)[,2])) -> shot_selection_cluster_lm_me
+
+play_by_play_season_bins_clustered %>% group_by(cluster,x_court_bin,y_court_bin) %>% summarize(true_expected_points = sum(estimated_points)/sum(estimated_shot_attempts)) %>% inner_join(shot_selection_cluster_lm_me, by = "cluster") -> play_by_play_season_bins_clustered_me
+
+play_by_play_season_bins_clustered_me %>% write_csv("data/play_by_play_season_bins_clustered_me.csv")
+
+
+pdf("visuals/analysisVisualsClustering.pdf")
+
+
+shot_selection_lm_me %>% ggplot(aes(x=x_court_bin, y=y_court_bin, color=estimate, fill=estimate )) + geom_point(size=5) +scale_color_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" ) +scale_fill_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" )
+
+#these need Lucida Sans Unicode to work properly
+#shot_selection_lm_me %>% ggplot(aes(x=x_court_bin, y=y_court_bin, color=estimate, fill=estimate )) + geom_text(label = "\u2B22",size=12,family = "Lucida Sans Unicode") +scale_color_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" ) +scale_fill_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" )
+
+#play_by_play_season_bins_clustered_me %>% ggplot(aes(x=x_court_bin, y=y_court_bin, color=estimate )) + geom_text(label = "\u2B22",size=12,family = "Lucida Sans Unicode") +scale_color_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" )
+
+#play_by_play_season_bins_clustered_me %>% ggplot(aes(x=x_court_bin, y=y_court_bin, color=cluster)) + geom_text(label = "\u2B22",size=12,family = "Lucida Sans Unicode") +scale_color_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" )
+
+play_by_play_season_bins_clustered_me %>% mutate(cluster = as.factor(cluster)) %>% ggplot(aes(x=x_court_bin, y=y_court_bin, color=estimate )) + geom_point(size=5)+scale_color_gradient2(midpoint=0, low="blue", mid="white",high="red", space ="Lab" )   + theme_dark()
+
+play_by_play_season_bins_clustered_me %>% mutate(cluster = as.factor(cluster)) %>% ggplot(aes(x=x_court_bin, y=y_court_bin, color=cluster, fill=estimate )) + geom_point(size=5)   + theme_dark() + scale_color_discrete()
+
+
+dev.off()
+```
+
+
+James Harden analysis
+```{r}
+
+read_csv("../cleanedData/generatedData/James Harden_HOU_2019_true_shooting_over_expected_bins.csv") -> james_harden_bins
+
+pdf("visuals/jamesHardenTPEP.pdf")
+james_harden_bins %>% ggplot(aes(x=true_shooting_over_expected)) + geom_density() + xlab("TP-EP") + ggtitle("James Harden 2019-20 TP-EP Density Plot") + theme_bw()
+dev.off()
+
+read_csv("../cleanedData/generatedData/MIL_2020_true_shooting_over_expected_bins.csv") -> mil_2020
+
+pdf("visuals/mil2020TPEP.pdf")
+mil_2020 %>% ggplot(aes(x=true_shooting_over_expected)) + geom_density() + xlab("TP-EP") + ggtitle("Milwaukee Bucks 2020-21 TP-EP Density Plot") + theme_bw()
+dev.off()
+
+
+read_csv("../cleanedData/generatedData/2020_true_shooting_over_expected_bins.csv") -> nba_2020
+
+pdf("visuals/nba2020TPEP.pdf")
+nba_2020 %>% ggplot(aes(x=true_shooting_over_expected)) + geom_density() + xlab("TP-EP") + ggtitle("NBA 2020-21 TP-EP Density Plot") + theme_bw()
+dev.off()
+```
+
+
+
+Play by Play summary stats
+```{r}
+options(max.print=9999)
+
+play_by_play %>% filter(!is.na(points)) -> play_by_play_shots
+play_by_play %>% filter(!is.na(shot_play)) -> play_by_play_shots
+
+
+play_by_play_shots %>% filter(playoffs == F) %>% group_by(season, fga) %>% summarise(shots = n(), games = n_distinct(as.numeric(game_id))) -> play_by_play_shots_summary
+play_by_play_shots_summary %>% group_by(fga) %>% summarise(shots = sum(shots), games = sum(games)) -> play_by_play_shots_total_summary
+play_by_play_shots_summary %>% write_csv("data/play_by_play_shots_summary.csv")
+
+play_by_play_shots_summary %>% group_by(fga) %>% summarize(shots = sum(shots), games = sum(games))
+
+sum(play_by_play_shots_total_summary$shots)/max(play_by_play_shots_total_summary$games)/2 #unique team games
+
+```
+

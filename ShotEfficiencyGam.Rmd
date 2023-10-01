@@ -1,0 +1,337 @@
+---
+title: "Untitled"
+output: html_document
+date: "2022-10-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(sjPlot)
+library(viridis) 
+library(RColorBrewer)
+library(ggeffects)
+library(PerformanceAnalytics)
+library(corrplot)
+library(pedometrics )
+library(tidyverse)
+#install.packages("sjPlot")
+
+library(regclass)
+```
+
+```{r}
+
+
+nba_advanced_stats <- read_csv("data/nba_advanced_stats.csv")
+team_names_bbref <- read_csv("data/team_names_bbref.csv")
+nba_advanced_stats %>% rename(team_name = Team, season=Season) -> nba_advanced_stats
+nba_advanced_stats$team_name<-gsub("[*]","",nba_advanced_stats$team_name)
+nba_advanced_stats %>% inner_join(team_names_bbref) -> nba_advanced_stats
+
+play_by_play_season_team_bins <- read_csv("../cleanedData/play_by_play_season_team_bins.csv")
+play_by_play_season_team_bins %>% filter(playoffs == F) -> play_by_play_season_team_bins
+expected_points_by_team_summary_fg <- read_csv("data/expected_points_by_team_summary_fg_all_seasons.csv") #this is just the regular season and is from analysis_v3_all_seasons_for_nessis.Rmd
+play_by_play_season_game_team_summary <- read_csv("../cleanedData/play_by_play_season_game_team_summary.csv")
+play_by_play_season_game_team_summary %>% filter(playoffs == F) -> play_by_play_season_game_team_summary
+
+all_salary_data <- read_csv("data/all_salary_data.csv")
+team_names_conversion <- read_csv("data/team_names_conversion.csv")
+
+all_salary_data$inflation_adjusted_payroll <- as.numeric(gsub("[$,]","",all_salary_data$inflation_adjusted_payroll))/1000000
+all_salary_data %>% group_by(season) %>% mutate(payroll_normalized = payroll/max(payroll)) %>% ungroup() -> all_salary_data
+
+all_salary_data %>% rename(team_name = tm) %>% inner_join(team_names_conversion) -> all_salary_data
+```
+
+```{r}
+
+play_by_play_season_game_team_summary %>% mutate(team_win = points_game_total > opponent_points_game_total) -> play_by_play_season_game_team_summary
+play_by_play_season_game_team_summary %>% group_by(team, season) %>% summarize(wins = sum(team_win), games = n(), ppg = sum(points_game_total)) %>% mutate(win_perc = wins/games) %>% group_by(season) %>% mutate(ppg_normalized = ppg/max(ppg)) %>% ungroup() -> play_by_play_season_team_summary
+#play_by_play_season_team_bins %>% group_by(team, season) %>% mutate(shot_percentage = fga/sum(fga)) %>% summarize(efficiency = cor(shot_percentage,true_expected_points)) -> shot_selection_efficiency
+play_by_play_season_team_bins %>% group_by(team, season) %>% mutate(shot_percentage = fga/sum(fga)) %>% summarize(efficiency = cor(shot_percentage,true_expected_points)) -> shot_selection_efficiency
+```
+
+
+```{r}
+#may want to change from FGA to estimated shots attempted
+library(wCorr)
+play_by_play_season_team_bins %>% group_by(team, season) %>% mutate(shot_percentage = fga/sum(fga)) %>% summarize(exogenous_shooting_ability = mean(true_expected_points), efficiency = weightedCorr(x=shot_percentage,y=expected_points,weights=fga, method="Pearson"),true_shot_selection_efficiency = weightedCorr(x=shot_percentage,y=true_expected_points,weights=fga, method="Pearson"), true_expected_points = sum(true_expected_points), expected_points = sum(expected_points)) -> shot_selection_weighted_efficiency
+```
+
+```{r}
+shot_selection_weighted_efficiency %>% inner_join(expected_points_by_team_summary_fg,by = join_by(team, season)) %>% inner_join(play_by_play_season_team_summary,by = join_by(team, season))%>% inner_join(nba_advanced_stats,by = join_by(team, season))%>%left_join(all_salary_data,by = join_by(team, season)) -> shot_selection_weighted_efficiency_summary
+shot_selection_weighted_efficiency_summary %>% mutate(fg_perc = fgm / fga) -> shot_selection_weighted_efficiency_summary
+shot_selection_weighted_efficiency_summary %>% mutate(Pyth_W_pct = PW/82)   -> 
+shot_selection_weighted_efficiency_summary 
+
+shot_selection_weighted_efficiency_summary %>% mutate(W_pct = W/82)   -> shot_selection_weighted_efficiency_summary 
+shot_selection_weighted_efficiency_summary %>% write_csv("shot_selection_weighted_efficiency_summary.csv")
+
+shot_selection_weighted_efficiency_summary %>% select(team, season, true_shot_selection_efficiency, Pyth_W_pct, win_perc) %>% arrange(desc(true_shot_selection_efficiency)) %>% head(10) %>% write_csv("data/best_teams.csv")
+shot_selection_weighted_efficiency_summary %>% select(team, season, true_shot_selection_efficiency, Pyth_W_pct, win_perc) %>% arrange(true_shot_selection_efficiency) %>% head(10) %>% write_csv("data/worst_teams.csv")
+```
+
+```{r}
+lm(fg_perc ~ 0 + efficiency + team, data = shot_selection_weighted_efficiency_summary) -> fg_perc_model #don't have a baseline
+summary(fg_perc_model)
+
+# Extract coefficients
+coefficients <- coef(fg_perc_model)
+
+# Create a dataframe from coefficients
+team_shooting_ability<- tibble(team = names(coefficients), shooting_ability = coefficients, row.names = NULL)
+team_shooting_ability <- subset(team_shooting_ability, grepl("^team", team))
+
+# Remove the word "team" from coefficient names
+team_shooting_ability$team <- gsub("team", "", team_shooting_ability$team)
+
+shot_selection_weighted_efficiency_summary %>% inner_join(team_shooting_ability,by = join_by(team)) -> shot_selection_weighted_efficiency_summary
+
+
+```
+
+```{r}
+
+#shot_selection_weighted_efficiency_summary%>% filter(season < 2022) -> shot_selection_weighted_efficiency_summary
+
+
+color_option = scale_color_brewer(palette = "Dark2")
+fill_option = scale_fill_brewer(palette = "Dark2")
+
+theme_choice <- theme_bw()
+#pdf("visuals/analysisVisuals5.pdf")
+pdf("visuals/NESSIS.pdf")
+shot_selection_weighted_efficiency_summary %>% ggplot(aes(x=win_perc)) + geom_density() + theme_choice
+
+
+shot_selection_weighted_efficiency_summary %>% gather(type, efficiency, c(true_shot_selection_efficiency,efficiency)) %>% ggplot(aes(x=efficiency, fill=type)) + geom_density(alpha=0.5)  + theme_choice +  fill_option
+
+shot_selection_weighted_efficiency_summary %>% gather(type, expected_points, c(true_expected_points,expected_points)) %>% ggplot(aes(x=expected_points, fill=type)) + geom_density(alpha=0.5)  + theme_choice +  fill_option
+
+
+shot_selection_weighted_efficiency_summary %>% gather(type, efficiency, c(true_shot_selection_efficiency,efficiency)) %>% ggplot(aes(x=efficiency, y=Pyth_W_pct, fill=type, color=type)) + geom_point() + geom_smooth(method=lm) + theme_choice +  fill_option+  color_option
+
+
+shot_selection_weighted_efficiency_summary %>% ggplot(aes(x=true_shot_selection_efficiency)) + geom_density() + theme_choice
+
+shot_selection_weighted_efficiency_summary %>% ggplot(aes(x=true_shot_selection_efficiency, y=Pyth_W_pct)) + geom_point() + geom_smooth(method=lm) + theme_choice
+
+shot_selection_weighted_efficiency_summary %>% ggplot(aes(x=exogenous_shooting_ability, y=Pyth_W_pct)) + geom_point() + geom_smooth(method=lm) + theme_choice
+
+shot_selection_weighted_efficiency_summary %>% ggplot(aes(x=efficiency)) + geom_density() + theme_choice
+
+shot_selection_weighted_efficiency_summary %>% ggplot(aes(x=efficiency, y=Pyth_W_pct)) + geom_point() + geom_smooth(method=lm) + theme_choice
+
+dev.off()
+
+```
+
+
+```{r}
+library(pedometrics )
+#expected
+lm(ppg ~ efficiency + exogenous_shooting_ability, data = shot_selection_weighted_efficiency_summary) -> shot_selection_model
+summary(shot_selection_model)
+
+lm(ppg ~ efficiency + exogenous_shooting_ability + payroll_normalized, data = shot_selection_weighted_efficiency_summary) -> shot_selection_model_payroll
+summary(shot_selection_model_payroll)
+
+lm(ppg ~ efficiency + exogenous_shooting_ability + team, data = shot_selection_weighted_efficiency_summary) -> shot_selection_model_fe
+summary(shot_selection_model_fe)
+
+tab_model(shot_selection_model, shot_selection_model_payroll, shot_selection_model_fe, file="tables/expected_shot_selection_models.doc", digits = 3,show.se = T,show.ci=F)
+
+
+#true
+lm(ppg ~ true_shot_selection_efficiency + exogenous_shooting_ability, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model
+summary(true_shot_selection_model)
+
+lm(ppg ~ true_shot_selection_efficiency + exogenous_shooting_ability + payroll_normalized, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_payroll
+summary(true_shot_selection_model_payroll)
+
+
+summary(shot_selection_weighted_efficiency_summary$PW)
+
+sd(shot_selection_weighted_efficiency_summary$true_shot_selection_efficiency)
+
+
+lm( Pyth_W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability + `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe1
+summary(true_shot_selection_model_fe1)
+
+lm( Pyth_W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability + team +  `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe2
+summary(true_shot_selection_model_fe2)
+
+lm( Pyth_W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability+ season +  `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe3
+summary(true_shot_selection_model_fe3)
+
+lm( Pyth_W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability+ team + season +  `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe4
+summary(true_shot_selection_model_fe4)
+
+lm( W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability +  `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe5
+summary(true_shot_selection_model_fe5)
+
+lm( W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability  + team + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe6
+summary(true_shot_selection_model_fe6)
+
+
+lm( W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability  + season + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe7
+summary(true_shot_selection_model_fe7)
+
+lm( W_pct ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability  + team + season + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe8
+summary(true_shot_selection_model_fe8)
+
+
+lm( NRtg ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability +  `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe9
+summary(true_shot_selection_model_fe9)
+
+lm( NRtg ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability  + team + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe10
+summary(true_shot_selection_model_fe10)
+
+
+lm( NRtg ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability  + season + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe11
+summary(true_shot_selection_model_fe11)
+
+lm( NRtg ~ DRtg+ true_shot_selection_efficiency + exogenous_shooting_ability  + team + season+ `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe12
+summary(true_shot_selection_model_fe12)
+
+lm( Pyth_W_pct ~ true_shot_selection_efficiency + exogenous_shooting_ability + inflation_adjusted_payroll, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe13_payroll
+summary(true_shot_selection_model_fe13_payroll)
+true_shot_selection_model_fe13_payroll_stepVIF <- stepVIF(true_shot_selection_model_fe13_payroll, threshold = 10, verbose = TRUE)
+
+lm(formula = Pyth_W_pct ~ DRtg + true_shot_selection_efficiency + exogenous_shooting_ability + payroll_normalized + I(payroll_normalized^2) + team + season, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe14_payroll#peaks when payroll = 0.81229
+summary(true_shot_selection_model_fe14_payroll)
+true_shot_selection_model_fe14_payroll_stepVIF <- stepVIF(true_shot_selection_model_fe14_payroll, threshold = 10, verbose = TRUE)
+
+tab_model(true_shot_selection_model_fe4,true_shot_selection_model_fe8, true_shot_selection_model_fe14_payroll, file="tables/true_shot_selection_models.doc", digits = 3,show.se = T,show.ci=F)
+
+true_shot_selection_model_fe4_vif <- VIF(true_shot_selection_model_fe4) 
+true_shot_selection_model_fe8_vif <- VIF(true_shot_selection_model_fe8) 
+true_shot_selection_model_fe12_vif <- VIF(true_shot_selection_model_fe12) 
+true_shot_selection_model_fe13_payroll_vif <- VIF(true_shot_selection_model_fe13_payroll) 
+```
+
+
+
+```{r}
+library(PerformanceAnalytics)
+library(corrplot)
+library(ggeffects)
+pdf("visuals/NESSIS_ME.pdf")
+#shot_selection_model_payroll %>% ggeffect(terms = c("efficiency","exogenous_shooting_ability")) %>% plot() + theme_choice + color_option + fill_option
+true_shot_selection_model_fe4 %>% ggpredict(terms = c("true_shot_selection_efficiency","exogenous_shooting_ability")) %>% plot() + theme_choice + color_option + fill_option + ggtitle("true_shot_selection_model_fe4")
+true_shot_selection_model_fe8  %>% ggpredict(terms = c("true_shot_selection_efficiency","exogenous_shooting_ability")) %>% plot() + theme_choice + color_option + fill_option + ggtitle("true_shot_selection_model_fe8")
+true_shot_selection_model_fe12  %>% ggpredict(terms = c("true_shot_selection_efficiency","exogenous_shooting_ability")) %>% plot() + theme_choice + color_option + fill_option + ggtitle("true_shot_selection_model_fe12")
+true_shot_selection_model_fe14_payroll  %>% ggeffect(terms = c("true_shot_selection_efficiency","payroll_normalized", "exogenous_shooting_ability")) %>% plot() + theme_choice + color_option + fill_option + ggtitle("Marginal Effect of True Shooting Efficiency on Expected Win Percentage") + theme(legend.position="bottom")
+shot_selection_weighted_efficiency_summary %>% ungroup() %>% select(Pyth_W_pct, W_pct,NRtg, true_shot_selection_efficiency,exogenous_shooting_ability, `off_TOV%`, `off_ORB%`, DRtg, payroll_normalized, season) -> selected_data
+corrplot(cor(selected_data), type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+chart.Correlation(selected_data, histogram=TRUE, pch=19)
+dev.off()
+```
+
+```{r}
+library(gtsummary)
+
+selected_data %>%  tbl_summary(
+    type = all_continuous() ~ "continuous2",
+    statistic = all_continuous() ~ c("{median} ({sd}) {min} - {max}"
+    )
+  ) 
+```
+
+gam analysis
+```{r}
+shot_selection_weighted_efficiency_summary %>% pull(team) %>% unique() %>% sort() -> teams
+shot_selection_weighted_efficiency_summary %>% pull(season) %>% unique() %>% sort() -> seasons
+seasons[1:6] -> seasons
+all_team_gam_data <- tibble()
+
+for(team in teams){
+  for(season in seasons){
+    all_team_gam_data %>% bind_rows(read_csv(paste0("data/team_data/", team, season,".csv"))) -> all_team_gam_data
+  }
+}
+
+
+```
+
+
+```{r}
+shot_selection_weighted_efficiency_summary %>% inner_join(all_team_gam_data %>% rename(gam_shot_selection_efficiency = shot_selection_efficiency_coefficient), by = join_by(team, season)) -> shot_selection_weighted_efficiency_summary
+```
+
+
+
+```{r}
+
+
+#true
+lm(ppg ~ gam_shot_selection_efficiency + exogenous_shooting_ability, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model
+summary(true_shot_selection_model)
+
+lm(ppg ~ gam_shot_selection_efficiency + exogenous_shooting_ability + payroll_normalized, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_payroll
+summary(true_shot_selection_model_payroll)
+
+
+summary(shot_selection_weighted_efficiency_summary$PW)
+
+sd(shot_selection_weighted_efficiency_summary$gam_shot_selection_efficiency)
+
+
+lm( Pyth_W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability + `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe1
+summary(true_shot_selection_model_fe1)
+
+lm( Pyth_W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability + team +  `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe2
+summary(true_shot_selection_model_fe2)
+
+lm( Pyth_W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability+ season +  `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe3
+summary(true_shot_selection_model_fe3)
+
+lm( Pyth_W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability+ team + season +  `off_TOV%`+ `off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe4
+summary(true_shot_selection_model_fe4)
+
+lm( W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability +  `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe5
+summary(true_shot_selection_model_fe5)
+
+lm( W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability  + team + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe6
+summary(true_shot_selection_model_fe6)
+
+
+lm( W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability  + season + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe7
+summary(true_shot_selection_model_fe7)
+
+lm( W_pct ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability  + team + season + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe8
+summary(true_shot_selection_model_fe8)
+
+
+lm( NRtg ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability +  `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe9
+summary(true_shot_selection_model_fe9)
+
+lm( NRtg ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability  + team + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe10
+summary(true_shot_selection_model_fe10)
+
+
+lm( NRtg ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability  + season + `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe11
+summary(true_shot_selection_model_fe11)
+
+lm( NRtg ~ DRtg+ gam_shot_selection_efficiency + exogenous_shooting_ability  + team + season+ `off_TOV%`+`off_ORB%` , data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe12
+summary(true_shot_selection_model_fe12)
+
+lm( Pyth_W_pct ~ gam_shot_selection_efficiency + exogenous_shooting_ability + inflation_adjusted_payroll, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe13_payroll
+summary(true_shot_selection_model_fe13_payroll)
+true_shot_selection_model_fe13_payroll_stepVIF <- stepVIF(true_shot_selection_model_fe13_payroll, threshold = 10, verbose = TRUE)
+
+lm(formula = Pyth_W_pct ~ DRtg + gam_shot_selection_efficiency + exogenous_shooting_ability + payroll_normalized + I(payroll_normalized^2) + team + season, data = shot_selection_weighted_efficiency_summary) -> true_shot_selection_model_fe14_payroll#peaks when payroll = 0.81229
+summary(true_shot_selection_model_fe14_payroll)
+true_shot_selection_model_fe14_payroll_stepVIF <- stepVIF(true_shot_selection_model_fe14_payroll, threshold = 10, verbose = TRUE)
+
+tab_model(true_shot_selection_model_fe4,true_shot_selection_model_fe8, true_shot_selection_model_fe14_payroll, file="tables/gam_true_shot_selection_models.doc", digits = 3,show.se = T,show.ci=F)
+```
+
+```{r}
+shot_selection_weighted_efficiency_summary %>% select(Pyth_W_pct, win_perc, team, season, gam_shot_selection_efficiency, exogenous_shooting_ability) %>% arrange(desc(exogenous_shooting_ability)) %>% head(10) %>% bind_rows(shot_selection_weighted_efficiency_summary %>% select(Pyth_W_pct, win_perc, team, season, gam_shot_selection_efficiency, exogenous_shooting_ability) %>% arrange(exogenous_shooting_ability) %>% head(10))
+```
+
