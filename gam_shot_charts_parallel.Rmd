@@ -31,6 +31,7 @@ library(foreach)
 library(MASS)
 #remotes::install_github("marcpaterno/rcosmosis")
 library(rcosmosis)
+library(wCorr)
 source("lib/court.R")
 source("lib/viztools.R")
 options(future.globals.maxSize= 8912896000)
@@ -41,7 +42,7 @@ play_by_play_with_free_throw_results_shots <- read_csv("data/play_by_play_with_f
 
 ```{r}
 n.cores <- parallel::detectCores() - 1
-n.cores <- 32
+n.cores <- 48
 my.cluster <- parallel::makeCluster(
   n.cores, 
   type = "PSOCK"
@@ -160,6 +161,7 @@ clusterCall(my.cluster, function() {
   library(foreach)
   library(MASS)
   library(rcosmosis)
+  library(wCorr)
   source("lib/court.R")
   source("lib/viztools.R")
   create_gam_shot_chart <- function(data, value, title, subtitle, fill_title,min_true_shot_value, average_true_shot_value, max_true_shot_value){
@@ -317,7 +319,11 @@ for (season in seasons){
     saveImage(kde_over_league, filename = paste0("visuals/shot_charts/",season,"/density_over_league_",team, " ", season,"-",season-1999, "_Season.png"))
     
     shot_selection_efficiency_coefficient <- cor(grid$true_points, grid$density)
-    create_gam_shot_chart(grid,"shot_selection_efficiency_over_league",paste0(team, " ", season,"-",season-1999, " Season"),paste0("Shot Selection Efficiency Coefficient: ",round(shot_selection_efficiency_coefficient,2),".") ,"Efficiency over League",grid %>% pull(shot_selection_efficiency_over_league) %>% min(), 0, grid %>% pull(shot_selection_efficiency_over_league) %>% max()) -> shot_selection_efficiency_over_league
+    
+    shot_selection_efficiency_weighted_coefficient <- weightedCorr(x=grid$true_points,y= grid$density,weights= grid$density, method="Pearson")
+    
+    
+    create_gam_shot_chart(grid,"shot_selection_efficiency_over_league",paste0(team, " ", season,"-",season-1999, " Season"),paste0("Shot Selection Efficiency Coefficient: ",round(shot_selection_efficiency_weighted_coefficient,2),".") ,"Efficiency over League",grid %>% pull(shot_selection_efficiency_over_league) %>% min(), 0, grid %>% pull(shot_selection_efficiency_over_league) %>% max()) -> shot_selection_efficiency_over_league
     
     saveImage(shot_selection_efficiency_over_league, filename = paste0("visuals/shot_charts/",season,"/shot_selection_efficiency_over_league_",team, " ", season,"-",season-1999, "_Season.png"))
     
@@ -340,8 +346,53 @@ for (season in seasons){
     #print(gam_shot_chart)
     saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/fga_expected_points_",team, " ", season,"-",season-1999, "_Season.png"))
     
-    team_shot_selection_data %>% bind_rows(tibble(season = season, team = team, shot_selection_efficiency_coefficient = shot_selection_efficiency_coefficient)) -> team_shot_selection_data
-    tibble(season = season, team = team, shot_selection_efficiency_coefficient = shot_selection_efficiency_coefficient) %>% write_csv(paste0("data/team_data/",team,season,".csv"))
+    team_shot_selection_data %>% bind_rows(tibble(season = season, team = team, shot_selection_efficiency_coefficient = shot_selection_efficiency_coefficient,shot_selection_efficiency_weighted_coefficient=shot_selection_efficiency_weighted_coefficient)) -> team_shot_selection_data
+    tibble(season = season, team = team, shot_selection_efficiency_coefficient = shot_selection_efficiency_coefficient,shot_selection_efficiency_weighted_coefficient=shot_selection_efficiency_weighted_coefficient) %>% write_csv(paste0("data/team_data/",team,season,".csv"))
+    
+    players <- data %>% pull(player_shooting) %>% unique()
+    for(player in players){
+        play_by_play_with_free_throw_results_reg_season_attempts %>% filter((season == current_season) & (player_shooting_team==current_team) * (player_shooting == player)) -> data
+        shot_position_model_gam = gam(true_points ~ s(x,y) ,data=data, weights = simulated_fouled_missed_fouled_shots_weight)
+        grid_dim <- 200
+        grid_tile_width <- 50/grid_dim
+        grid_tile_height <- 50/grid_dim
+        data %>% data_grid(x = seq(0,50,grid_tile_width), y = seq(0,(94/2),grid_tile_height)) -> grid
+        grid$true_points <- predict(shot_position_model_gam, grid)
+        grid$league_true_points <- predict(league_shot_position_model_gam, grid)
+        grid$true_points_over_league_average = grid$true_points - grid$league_true_points
+        grid %>% filter(true_points >= 0) -> grid
+    
+        
+        #density_estimation <- kde2d(data$x, data$y, n = c((50/grid_tile_width)+1,((94/2)/grid_tile_height)+1), lims = c(0, 50, 0, (94/2)))
+        density_estimation <- kde2d(data$x, data$y, n = c((50/grid_tile_width)+1,((94/2)/grid_tile_height)+1), lims = c(0, 50, 0, (94/2)), h=5)
+        density_estimation <- vmat2df(density_estimation) %>% rename(density=z)
+    
+        grid %>% inner_join(density_estimation, by = c("x", "y")) -> grid
+        grid$shot_selection_efficiency <- grid$true_points * grid$density
+        grid %>% inner_join(grid_season, by = c("x", "y"),suffix = c("","_league")) -> grid
+     
+        
+        
+        
+        grid$density_over_league = grid$density - grid$density_league
+        grid$shot_selection_efficiency_over_league = grid$shot_selection_efficiency - grid$shot_selection_efficiency_league
+        print(team)
+        print(grid %>% head(1))
+        grid %>% pull(true_points) %>% min() -> min_true_shot_value
+        grid %>% pull(true_points) %>% max() -> max_true_shot_value
+        create_gam_shot_chart(grid,"true_points",paste0(player, " ", team, " ", season,"-",season-1999, " Season"),"GAM True Shot Model","Expected Points" ,min_true_shot_value, average_true_shot_value, max_true_shot_value) -> gam_shot_chart
+        #print(gam_shot_chart)
+        saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/true_",team, " ", season,"-",season-1999, "_", player, "_Season.png"))
+        
+        shot_position_model_gam = gam(points ~ s(x,y) ,data=data %>% filter(is.na(s_foul),simulated_fouled_shot == 0))
+        grid$points <- predict(shot_position_model_gam, grid)
+        grid %>% pull(points) %>% min() -> min_true_shot_value
+        grid %>% pull(points) %>% max() -> max_true_shot_value
+        create_gam_shot_chart(grid,"points",paste0(player, " ", team, " ", season,"-",season-1999, " Season"),"FGA Expected Points","Expected Points",min_true_shot_value, average_fga_shot_value, max_true_shot_value ) -> gam_shot_chart
+        #print(gam_shot_chart)
+        saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/fga_expected_points_",team, " ", season,"-",season-1999, "_", player, "_Season.png"))
+    }
+    
     
     data
     #saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/true_",team, " ", season,"-",season-1999, "_Season.svg"))
@@ -395,7 +446,8 @@ for (season in seasons){
   grid %>% filter(is.numeric(true_points_over_expected )) -> grid
   grid %>% pull(true_points_over_expected) %>% min() -> min_true_shot_value
   grid %>% pull(true_points_over_expected) %>% max() -> max_true_shot_value
-  create_gam_shot_chart(grid,"true_points_over_expected",paste0("NBA ", season,"-",season-1999, " Season"), "GAM True Points over Expected Points Model","True over Expected" ,min_true_shot_value, average_true_shot_value, max_true_shot_value)  -> league_gam_shot_chart
+  create_gam_shot_chart(grid,"true_points_over_expected",paste0("NBA ", season,"-",season-1999, " Season"), "GAM True Net of Expected Points Model","True Net of Expected Points" ,min_true_shot_value, 0, max_true_shot_value)  -> league_gam_shot_chart
+  #create_gam_shot_chart(grid,"true_points_over_expected",paste0("NBA ", season,"-",season-1999, " Season"), "GAM True Points over Expected Points Model","True over Expected" ,min_true_shot_value, average_true_shot_value, max_true_shot_value)  -> league_gam_shot_chart
   #print(league_gam_shot_chart)
   saveImage(league_gam_shot_chart, filename = paste0("visuals/shot_charts/true_over_expected_",season,"-",season-1999, "_Season.png"))
   saveImage(league_gam_shot_chart, filename = paste0("visuals/shot_charts/true_over_expected_",season,"-",season-1999, "_Season.svg"))
@@ -411,14 +463,35 @@ for (season in seasons){
     data %>% data_grid(x = seq(0,50,grid_tile_width), y = seq(0,(94/2),grid_tile_height)) -> grid
     grid$true_points_over_expected <- predict(shot_position_model_gam, grid)
     grid %>% filter(is.numeric(true_points_over_expected)) -> grid
-    grid %>% pull(true_points_over_expected) %>% min() -> min_true_shot_value
+    grid %>% pull(true_points_over_expected) %>% min() -> min_true_shot_values
     grid %>% pull(true_points_over_expected) %>% max() -> max_true_shot_value
-    create_gam_shot_chart(grid,"true_points_over_expected",paste0(team," ", season,"-",season-1999, " Season"), "GAM True Points over Expected Points Model","True over Expected" ,min_true_shot_value, average_true_shot_value, max_true_shot_value) -> gam_shot_chart
+    
+    create_gam_shot_chart(grid,"true_points_over_expected",paste0(team," ", season,"-",season-1999, " Season"), "GAM True Net of Expected Points Model","True Net of Expected Points" ,min_true_shot_value, 0, max_true_shot_value) -> gam_shot_chart
+    #create_gam_shot_chart(grid,"true_points_over_expected",paste0(team," ", season,"-",season-1999, " Season"), "GAM True Points over Expected Points Model","True over Expected" ,min_true_shot_value, average_true_shot_value, max_true_shot_value) -> gam_shot_chart
     #print(gam_shot_chart)
     saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/true_over_expected_",team, " ", season,"-",season-1999, "_Season.png"))
     #saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/true_over_expected_",team, " ", season,"-",season-1999, "_Season.svg"))
     
-    
+    players <- data %>% pull(player_shooting) %>% unique()
+    for(player in players){
+        play_by_play_with_free_throw_results_reg_season_attempts %>% filter((season == current_season) & (player_shooting_team==current_team) * (player_shooting == player)) -> data
+        
+
+        shot_position_model_gam = gam(true_points_over_expected ~ s(x,y) ,data=data, weights = simulated_fouled_missed_fouled_shots_weight)
+        grid_dim <- 200
+        grid_tile_width <- 50/grid_dim
+        grid_tile_height <- 50/grid_dim
+        data %>% data_grid(x = seq(0,50,grid_tile_width), y = seq(0,(94/2),grid_tile_height)) -> grid
+        grid$true_points_over_expected <- predict(shot_position_model_gam, grid)
+        grid %>% filter(is.numeric(true_points_over_expected)) -> grid
+        grid %>% pull(true_points_over_expected) %>% min() -> min_true_shot_value
+        grid %>% pull(true_points_over_expected) %>% max() -> max_true_shot_value
+        
+        create_gam_shot_chart(grid,"true_points_over_expected",paste0(player, " ", team, " ", season,"-",season-1999, " Season"), "GAM True Net of Expected Points Model","True Net of Expected Points" ,min_true_shot_value, 0, max_true_shot_value) -> gam_shot_chart
+
+        #print(gam_shot_chart)
+        saveImage(gam_shot_chart, filename = paste0("visuals/shot_charts/",season,"/true_over_expected_",team, " ", season,"-",season-1999, "_", player, "_Season.png"))
+    }
  
     data
   }

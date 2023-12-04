@@ -32,12 +32,12 @@ play_by_play_bins <- read_csv("../cleanedData/play_by_play_bins.csv")
 play_by_play <- read_csv("../cleanedData/play_by_play.csv")
 
 #comment out the following lines to include all data
-play_by_play_fg_type %>% filter(season < 2022) -> play_by_play_fg_type
-play_by_play %>% filter(season < 2022) -> play_by_play
-play_by_play_fg_type %>% filter(season < 2022) ->play_by_play_fg_type
-play_by_play_season_team_bins %>% filter(season < 2022) -> play_by_play_season_team_bins
-play_by_play_season_game_team_bin_summary%>% filter(season < 2022) -> play_by_play_season_game_team_bin_summary
-play_by_play_bins%>% filter(season < 2022) -> play_by_play_bins
+# play_by_play_fg_type %>% filter(season < 2022) -> play_by_play_fg_type
+# play_by_play %>% filter(season < 2022) -> play_by_play
+# play_by_play_fg_type %>% filter(season < 2022) ->play_by_play_fg_type
+# play_by_play_season_team_bins %>% filter(season < 2022) -> play_by_play_season_team_bins
+# play_by_play_season_game_team_bin_summary%>% filter(season < 2022) -> play_by_play_season_game_team_bin_summary
+# play_by_play_bins%>% filter(season < 2022) -> play_by_play_bins
 
 
 
@@ -610,7 +610,7 @@ Shot chart cluster analysis
 shot_selection_lm <- lm(data=play_by_play_season_game_team_bins, formula=points_difference~shot_percentage_difference:bin_id)
 shot_selection_lm$coefficients
 tibble(bin_id=names(shot_selection_lm$coefficients), estimate = shot_selection_lm$coefficients) -> shot_selection_lm_me
-shot_selection_lm_me %>% filter(bin_id != "(Intercept)") %>% mutate(x_court_bin = str_split_fixed(bin_id, c(","),n=2)[,1],y_court_bin=as.numeric(str_split_fixed(bin_id, ",",n=2)[,2]),x_court_bin = as.numeric(str_split_fixed(x_court_bin, c("bin_id"),n=2)[,2])) -> shot_selection_lm_me
+shot_selection_lm_me %>% filte(bin_id != "(Intercept)") %>% mutate(x_court_bin = str_split_fixed(bin_id, c(","),n=2)[,1],y_court_bin=as.numeric(str_split_fixed(bin_id, ",",n=2)[,2]),x_court_bin = as.numeric(str_split_fixed(x_court_bin, c("bin_id"),n=2)[,2])) -> shot_selection_lm_me
 
 
 
