@@ -15,6 +15,7 @@ This code can also produce differential shot charts. For the 2021-22 Bucks, the 
 `ShotEfficiencyGam.Rmd`: Script to validate the shot selection metric\
 `app.R`: Script for interactive Shiny dashboard\
 `data_clean.ipynb`: Script for prepping the PbP data.
-`lib`: Libraries for above scripts\
-`data`: Data location of cleaned data\
-`rawData`: Data location of raw play-by-play data\
+`lib/`: Libraries for above scripts\
+`data/`: Data location of cleaned data\
+`rawData/`: Data location of raw play-by-play data\
+`images/`: Example True Shot Charts\
