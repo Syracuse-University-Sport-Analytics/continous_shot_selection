@@ -18,4 +18,4 @@ This code can also produce differential shot charts. For the 2021-22 Bucks, the 
 `lib/`: Libraries for above scripts\
 `data/`: Data location of cleaned data\
 `rawData/`: Data location of raw play-by-play data\
-`images/`: Example True Shot Charts\
+`images/`: Example True Shot Charts
